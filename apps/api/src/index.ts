@@ -4,22 +4,26 @@
  * HTTP:
  *   GET  /health
  *   GET  /tables                  list active tables
- *   POST /tables                  operator-only (for now, auth by API key)
+ *   POST /tables                  operator-only (API key guard for dev)
  *   GET  /tables/:id              current snapshot
  *   POST /auth/nonce              SIWS nonce
- *   POST /auth/verify             SIWS signature verify → session cookie
+ *   POST /auth/verify             SIWS signature verify → sessionId
+ *   POST /auth/logout             revoke sessionId
  *
  * WS:
- *   /ws/:tableId                  streaming TableView + action channel
+ *   /ws/:tableId?session=<id>     session-bound; server reads the wallet from
+ *                                 the session (NOT from a URL param) so nobody
+ *                                 can impersonate another player.
  */
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ServerWebSocket } from "bun";
-import { PublicKey } from "@solana/web3.js";
-import nacl from "tweetnacl";
+import { Connection, PublicKey } from "@solana/web3.js";
 import { zAction, type ServerEvent } from "@lightly/shared";
+import { decodeSeat, seatPda } from "@lightly/idl";
 import { HoldemEngine, type HandOutcome, type TableConfig } from "./engine.ts";
+import { issueNonce, resolveSession, revokeSession, verifyAndIssueSession } from "./auth.ts";
 
 const app = new Hono();
 app.use("*", cors({ origin: "*", credentials: true }));
@@ -30,17 +34,35 @@ type TableEntry = {
   config: TableConfig;
   engine: HoldemEngine;
   sockets: Set<ServerWebSocket<SocketData>>;
+  walletToSocket: Map<string, ServerWebSocket<SocketData>>;
   mint: string;
   onchainTableId: bigint;
+  tablePda: PublicKey;
 };
 const tables = new Map<string, TableEntry>();
-const nonces = new Map<string, { nonce: string; expiresAt: number }>();
 
-type SocketData = { tableId: string; wallet: string };
+type SocketData = { tableId: string; wallet: string; sessionId: string };
+
+// ---------- RPC (optional) ----------
+//
+// If RPC_URL is set, we fetch each joining player's on-chain PlayerSeat PDA and
+// require a nonzero balance. In dev without a validator, we skip the check.
+
+const RPC_URL = process.env.RPC_URL ?? "";
+const rpc = RPC_URL ? new Connection(RPC_URL, "confirmed") : null;
+
+async function fetchOnchainBalance(tablePda: PublicKey, wallet: string): Promise<bigint | null> {
+  if (!rpc) return null; // skip check in dev without validator
+  const [seat] = seatPda(tablePda, new PublicKey(wallet));
+  const acc = await rpc.getAccountInfo(seat);
+  if (!acc) return 0n;
+  try { return decodeSeat(acc.data).balance; }
+  catch { return 0n; }
+}
 
 // ---------- Health ----------
 
-app.get("/health", (c) => c.json({ ok: true, tables: tables.size }));
+app.get("/health", (c) => c.json({ ok: true, tables: tables.size, rpc: !!rpc }));
 
 // ---------- Tables ----------
 
@@ -49,6 +71,7 @@ app.get("/tables", (c) =>
     [...tables.values()].map((t) => ({
       tableId: t.config.tableId,
       onchainTableId: String(t.onchainTableId),
+      tablePda: t.tablePda.toBase58(),
       mint: t.mint,
       smallBlind: t.config.smallBlind,
       bigBlind: t.config.bigBlind,
@@ -65,7 +88,9 @@ app.get("/tables/:id", (c) => {
   return c.json(table.engine.view(""));
 });
 
-// Operator-only in dev — API key guard. In prod this is a Squads-signed tx, not a POST.
+// Operator-only table create in dev — API key guard. In prod this is an
+// on-chain initialize_table tx from the Squads operator multisig; the API
+// just indexes new tables from the chain.
 app.post("/tables", async (c) => {
   const key = c.req.header("x-api-key");
   if (key !== (process.env.OPERATOR_API_KEY ?? "dev-secret")) {
@@ -82,12 +107,19 @@ app.post("/tables", async (c) => {
     rakeBps: body.rakeBps ?? 250,
     actionTimeoutMs: body.actionTimeoutMs ?? 30_000,
   };
-  createTableEntry(config, body.mint ?? "", BigInt(body.onchainTableId ?? 0));
+  const tablePda = body.tablePda ? new PublicKey(body.tablePda) : new PublicKey("11111111111111111111111111111111");
+  createTableEntry(config, body.mint ?? "", BigInt(body.onchainTableId ?? 0), tablePda);
   return c.json({ tableId: config.tableId });
 });
 
-function createTableEntry(config: TableConfig, mint: string, onchainTableId: bigint): TableEntry {
+function createTableEntry(
+  config: TableConfig,
+  mint: string,
+  onchainTableId: bigint,
+  tablePda: PublicKey,
+): TableEntry {
   const sockets = new Set<ServerWebSocket<SocketData>>();
+  const walletToSocket = new Map<string, ServerWebSocket<SocketData>>();
   const emit = (event: ServerEvent) => {
     const payload = JSON.stringify(event);
     for (const ws of sockets) {
@@ -103,8 +135,8 @@ function createTableEntry(config: TableConfig, mint: string, onchainTableId: big
     },
     emit,
     onHandComplete: (outcome: HandOutcome) => {
-      // In prod: submit begin_hand + settle_hand on-chain here (settlement worker).
-      // For MVP we emit the synthetic `settled` event immediately with a stub sig.
+      // In prod: submit begin_hand + settle_hand on-chain here (via Helius Sender,
+      // Jito-bundled, operator multisig signer). For the MVP we emit a stub.
       emit({
         kind: "settled",
         winners: outcome.winners,
@@ -113,7 +145,7 @@ function createTableEntry(config: TableConfig, mint: string, onchainTableId: big
       });
     },
   });
-  const entry: TableEntry = { config, engine, sockets, mint, onchainTableId };
+  const entry: TableEntry = { config, engine, sockets, walletToSocket, mint, onchainTableId, tablePda };
   tables.set(config.tableId, entry);
   return entry;
 }
@@ -133,6 +165,7 @@ if (!tables.size) {
     },
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     1n,
+    new PublicKey("11111111111111111111111111111111"),
   );
 }
 
@@ -141,26 +174,25 @@ if (!tables.size) {
 app.post("/auth/nonce", async (c) => {
   const body = await c.req.json();
   const wallet = z_wallet(body.wallet);
-  const nonce = crypto.randomUUID();
-  nonces.set(wallet, { nonce, expiresAt: Date.now() + 5 * 60_000 });
-  return c.json({ nonce, message: siwsMessage(wallet, nonce) });
+  const { nonce, message } = issueNonce(wallet);
+  return c.json({ nonce, message });
 });
 
 app.post("/auth/verify", async (c) => {
   const body = await c.req.json();
   const wallet = z_wallet(body.wallet);
-  const entry = nonces.get(wallet);
-  if (!entry || entry.expiresAt < Date.now()) {
-    throw new HTTPException(400, { message: "nonce expired" });
+  try {
+    const sessionId = verifyAndIssueSession(wallet, body.signature);
+    return c.json({ sessionId });
+  } catch (e) {
+    throw new HTTPException(401, { message: (e as Error).message });
   }
-  const message = siwsMessage(wallet, entry.nonce);
-  const sig = Uint8Array.from(Buffer.from(body.signature, "base64"));
-  const pub = new PublicKey(wallet).toBytes();
-  const ok = nacl.sign.detached.verify(new TextEncoder().encode(message), sig, pub);
-  if (!ok) throw new HTTPException(401, { message: "bad signature" });
-  nonces.delete(wallet);
-  // MVP: return the wallet as the session ID. Replace with JWT in prod.
-  return c.json({ sessionId: wallet });
+});
+
+app.post("/auth/logout", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  if (body.sessionId) revokeSession(body.sessionId);
+  return c.json({ ok: true });
 });
 
 function z_wallet(s: unknown): string {
@@ -169,23 +201,46 @@ function z_wallet(s: unknown): string {
   catch { throw new HTTPException(400, { message: "invalid pubkey" }); }
 }
 
-function siwsMessage(wallet: string, nonce: string): string {
-  return `Sign in to Lightly\nWallet: ${wallet}\nNonce: ${nonce}`;
-}
-
 // ---------- WebSocket (Bun native) ----------
 
 const PORT = Number(process.env.PORT ?? 4000);
+const REQUIRE_ONCHAIN_SEAT = process.env.REQUIRE_ONCHAIN_SEAT === "true";
+const DEV_ALLOW_UNSIGNED = process.env.DEV_ALLOW_UNSIGNED === "true";
 
 Bun.serve<SocketData, undefined>({
   port: PORT,
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     if (url.pathname.startsWith("/ws/")) {
       const tableId = url.pathname.slice("/ws/".length);
-      const wallet = url.searchParams.get("wallet") ?? "";
-      if (!tables.has(tableId)) return new Response("no table", { status: 404 });
-      const ok = server.upgrade(req, { data: { tableId, wallet } });
+      const table = tables.get(tableId);
+      if (!table) return new Response("no table", { status: 404 });
+
+      const sessionId = url.searchParams.get("session") ?? "";
+      let wallet = resolveSession(sessionId);
+
+      // Dev escape hatch — only if explicitly enabled, lets you pass a raw
+      // wallet without signing. Never ship this in prod.
+      if (!wallet && DEV_ALLOW_UNSIGNED) {
+        const raw = url.searchParams.get("wallet");
+        if (raw) { try { new PublicKey(raw); wallet = raw; } catch { /* noop */ } }
+      }
+      if (!wallet) return new Response("unauthenticated", { status: 401 });
+
+      // Optional: require on-chain seat with balance before letting the player join.
+      if (REQUIRE_ONCHAIN_SEAT) {
+        const bal = await fetchOnchainBalance(table.tablePda, wallet);
+        if (bal === null) return new Response("rpc unavailable", { status: 503 });
+        if (bal <= 0n) return new Response("no on-chain seat (buy_in first)", { status: 403 });
+      }
+
+      // Refuse a second WS for the same wallet — prevents one user from holding
+      // multiple sockets on the same seat (e.g. for multi-accounting signal).
+      if (table.walletToSocket.has(wallet)) {
+        return new Response("already connected", { status: 409 });
+      }
+
+      const ok = server.upgrade(req, { data: { tableId, wallet, sessionId } });
       return ok ? undefined : new Response("upgrade failed", { status: 400 });
     }
     return app.fetch(req);
@@ -195,6 +250,7 @@ Bun.serve<SocketData, undefined>({
       const table = tables.get(ws.data.tableId);
       if (!table) { ws.close(); return; }
       table.sockets.add(ws);
+      table.walletToSocket.set(ws.data.wallet, ws);
       table.engine.setConnected(ws.data.wallet, true);
       ws.send(JSON.stringify({ kind: "snapshot", view: table.engine.view(ws.data.wallet) }));
     },
@@ -208,34 +264,49 @@ Bun.serve<SocketData, undefined>({
         return;
       }
       try {
+        const wallet = ws.data.wallet;
         switch (parsed.kind) {
-          case "join": {
-            // The "join" here is a cosmetic seat assignment; on-chain `buy_in` is the
-            // real seat creation and must happen from the client before the dealer
-            // considers the seat funded. MVP: if the wallet has a chain seat with balance,
-            // the client pre-seats via HTTP; here we just track connection.
+          case "join":
+            // No-op: on-chain `buy_in` is what creates the seat. UI should call
+            // `ready` once they've confirmed their on-chain balance.
             break;
-          }
-          case "ready": {
-            if (table.engine.activeSeats().length >= 2) void table.engine.startHand();
+          case "ready":
+            // Seat the player locally using their on-chain balance as stack.
+            // Dev path: we use a hardcoded stack since we don't have RPC wired here.
+            if (!table.engine.activeSeats().some((s) => s.wallet === wallet)) {
+              const stack = 500_000_000; // 500 USDC in dev; in prod pull from getAccount
+              try { table.engine.seatPlayer(wallet, stack); }
+              catch (e) {
+                ws.send(JSON.stringify({ kind: "error", message: (e as Error).message }));
+                break;
+              }
+            }
+            if (table.engine.activeSeats().length >= 2) {
+              void table.engine.startHand();
+            }
+            // Broadcast updated snapshot to everyone on the table.
+            for (const otherWs of table.sockets) {
+              otherWs.send(
+                JSON.stringify({ kind: "snapshot", view: table.engine.view(otherWs.data.wallet) }),
+              );
+            }
             break;
-          }
           case "fold":
           case "check":
           case "call":
-            table.engine.act(ws.data.wallet, parsed.kind);
+            table.engine.act(wallet, parsed.kind);
             break;
           case "bet":
-            table.engine.act(ws.data.wallet, "bet", parsed.amount);
+            table.engine.act(wallet, "bet", parsed.amount);
             break;
           case "raise":
-            table.engine.act(ws.data.wallet, "raise", parsed.to);
+            table.engine.act(wallet, "raise", parsed.to);
             break;
           case "sit_out":
-            table.engine.leaveSeat(ws.data.wallet);
+            table.engine.requestLeave(wallet); // forfeit-safe
             break;
           case "ping":
-            ws.send(JSON.stringify({ kind: "snapshot", view: table.engine.view(ws.data.wallet) }));
+            ws.send(JSON.stringify({ kind: "snapshot", view: table.engine.view(wallet) }));
             break;
         }
       } catch (e) {
@@ -246,9 +317,10 @@ Bun.serve<SocketData, undefined>({
       const table = tables.get(ws.data.tableId);
       if (!table) return;
       table.sockets.delete(ws);
+      table.walletToSocket.delete(ws.data.wallet);
       table.engine.setConnected(ws.data.wallet, false);
     },
   },
 });
 
-console.log(`[lightly-api] listening on :${PORT}`);
+console.log(`[lightly-api] listening on :${PORT}${rpc ? ` rpc=${RPC_URL}` : ""}`);

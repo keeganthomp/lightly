@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { Action, TableView } from "@lightly/shared";
 import { PlayingCard } from "./Card.tsx";
+import { RevealOverlay } from "./Reveal.tsx";
 import { Seat } from "./Seat.tsx";
 import { useGame } from "./store.ts";
 
@@ -45,6 +46,7 @@ export function Table({ tableId, wallet, send }: { tableId: string; wallet: stri
         {me && me.wallet === wallet && rotated.toActSeat === me.seatIndex && (
           <ActionBar view={view} toCall={Math.max(0, view.currentBet - me.committed)} send={send} />
         )}
+        <RevealOverlay />
       </div>
     </div>
   );
@@ -88,22 +90,40 @@ function ActionBar({
   const minRaiseUsdc = (view.minRaiseTo / 1e6).toFixed(2);
   const [sizeUsdc, setSize] = useState(minRaiseUsdc);
   const sizeMicro = Math.round(Number(sizeUsdc) * 1e6);
-  const [timeLeft, setTimeLeft] = useState(100);
+  const [pct, setPct] = useState(1);
 
   const deadline = view.deadline ?? 0;
+  const startedAt = useRef<number>(Date.now());
   const lastDeadline = useRef(deadline);
   useEffect(() => {
     if (deadline !== lastDeadline.current) {
       lastDeadline.current = deadline;
+      startedAt.current = Date.now();
       setSize(minRaiseUsdc);
+      setPct(1);
     }
     const id = setInterval(() => {
+      const total = Math.max(1, deadline - startedAt.current);
       const remaining = Math.max(0, deadline - Date.now());
-      const pct = deadline > Date.now() ? (remaining / 30_000) * 100 : 0;
-      setTimeLeft(pct);
-    }, 120);
+      setPct(Math.max(0, Math.min(1, remaining / total)));
+    }, 100);
     return () => clearInterval(id);
   }, [deadline, minRaiseUsdc]);
+
+  // Keyboard shortcuts — F/C/R for fold/check-call/raise (feels snappier than clicking).
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.target instanceof HTMLInputElement) return;
+      if (e.key === "f" || e.key === "F") send({ kind: "fold" });
+      else if (e.key === "c" || e.key === "C") send(toCall === 0 ? { kind: "check" } : { kind: "call" });
+      else if (e.key === "r" || e.key === "R")
+        send(view.currentBet === 0 ? { kind: "bet", amount: sizeMicro } : { kind: "raise", to: sizeMicro });
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [send, sizeMicro, toCall, view.currentBet]);
+
+  const tint = pct < 0.3 ? "var(--danger)" : pct < 0.6 ? "#ffb547" : "var(--accent-2)";
 
   return (
     <motion.div
@@ -112,12 +132,15 @@ function ActionBar({
       animate={{ y: 0, opacity: 1 }}
       transition={{ type: "spring", stiffness: 300, damping: 24 }}
     >
-      <motion.div className="deadline-bar" style={{ width: "100%" }} animate={{ scaleX: timeLeft / 100 }} />
-      <button onClick={() => send({ kind: "fold" })}>Fold</button>
+      <div
+        className="deadline-bar"
+        style={{ width: "100%", transform: `scaleX(${pct})`, background: tint }}
+      />
+      <button onClick={() => send({ kind: "fold" })} title="F">Fold</button>
       {toCall === 0 ? (
-        <button onClick={() => send({ kind: "check" })}>Check</button>
+        <button onClick={() => send({ kind: "check" })} title="C">Check</button>
       ) : (
-        <button onClick={() => send({ kind: "call" })}>
+        <button onClick={() => send({ kind: "call" })} title="C">
           Call {(toCall / 1e6).toFixed(2)}
         </button>
       )}
@@ -130,11 +153,11 @@ function ActionBar({
         onChange={(e) => setSize(e.target.value)}
       />
       {view.currentBet === 0 ? (
-        <button className="primary" onClick={() => send({ kind: "bet", amount: sizeMicro })}>
+        <button className="primary" onClick={() => send({ kind: "bet", amount: sizeMicro })} title="R">
           Bet {sizeUsdc}
         </button>
       ) : (
-        <button className="primary" onClick={() => send({ kind: "raise", to: sizeMicro })}>
+        <button className="primary" onClick={() => send({ kind: "raise", to: sizeMicro })} title="R">
           Raise to {sizeUsdc}
         </button>
       )}

@@ -48,6 +48,9 @@ export const IX = {
   settleHand: disc("settle_hand"),
   emergencyTimeoutRefund: disc("emergency_timeout_refund"),
   withdrawRake: disc("withdraw_rake"),
+  setPaused: disc("set_paused"),
+  proposeOperator: disc("propose_operator"),
+  acceptOperator: disc("accept_operator"),
 } as const;
 
 // ---------- Account discriminators ----------
@@ -122,6 +125,7 @@ const TABLE_SCHEMA: borsh.Schema = {
   struct: {
     id: "u64",
     operator: { array: { type: "u8", len: 32 } },
+    pendingOperator: { array: { type: "u8", len: 32 } },
     tokenMint: { array: { type: "u8", len: 32 } },
     tokenProgram: { array: { type: "u8", len: 32 } },
     minBuyIn: "u64",
@@ -132,6 +136,7 @@ const TABLE_SCHEMA: borsh.Schema = {
     disputeWindowSlots: "u64",
     rakeAccrued: "u64",
     activeHandId: "u64",
+    paused: "bool",
     bump: "u8",
   },
 };
@@ -162,6 +167,7 @@ const RECEIPT_SCHEMA: borsh.Schema = {
 export type TableAccount = {
   id: bigint;
   operator: PublicKey;
+  pendingOperator: PublicKey;
   tokenMint: PublicKey;
   tokenProgram: PublicKey;
   minBuyIn: bigint;
@@ -172,6 +178,7 @@ export type TableAccount = {
   disputeWindowSlots: bigint;
   rakeAccrued: bigint;
   activeHandId: bigint;
+  paused: boolean;
   bump: number;
 };
 
@@ -200,6 +207,7 @@ export function decodeTable(data: Uint8Array): TableAccount {
   return {
     id: decoded.id as bigint,
     operator: new PublicKey(decoded.operator as Uint8Array),
+    pendingOperator: new PublicKey(decoded.pendingOperator as Uint8Array),
     tokenMint: new PublicKey(decoded.tokenMint as Uint8Array),
     tokenProgram: new PublicKey(decoded.tokenProgram as Uint8Array),
     minBuyIn: decoded.minBuyIn as bigint,
@@ -210,6 +218,7 @@ export function decodeTable(data: Uint8Array): TableAccount {
     disputeWindowSlots: decoded.disputeWindowSlots as bigint,
     rakeAccrued: decoded.rakeAccrued as bigint,
     activeHandId: decoded.activeHandId as bigint,
+    paused: decoded.paused as boolean,
     bump: decoded.bump as number,
   };
 }
@@ -460,6 +469,50 @@ export function ixWithdrawRake(args: {
       { pubkey: tokenProgram, isSigner: false, isWritable: false },
     ],
     data: Buffer.concat([IX.withdrawRake, u64Le(args.amount)]),
+  });
+}
+
+export function ixSetPaused(args: {
+  operator: PublicKey;
+  table: PublicKey;
+  paused: boolean;
+}): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: POKER_PROGRAM_ID,
+    keys: [
+      { pubkey: args.operator, isSigner: true, isWritable: false },
+      { pubkey: args.table, isSigner: false, isWritable: true },
+    ],
+    data: Buffer.concat([IX.setPaused, Buffer.from([args.paused ? 1 : 0])]),
+  });
+}
+
+export function ixProposeOperator(args: {
+  operator: PublicKey;
+  table: PublicKey;
+  newOperator: PublicKey;
+}): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: POKER_PROGRAM_ID,
+    keys: [
+      { pubkey: args.operator, isSigner: true, isWritable: false },
+      { pubkey: args.table, isSigner: false, isWritable: true },
+    ],
+    data: Buffer.concat([IX.proposeOperator, args.newOperator.toBuffer()]),
+  });
+}
+
+export function ixAcceptOperator(args: {
+  newOperator: PublicKey;
+  table: PublicKey;
+}): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: POKER_PROGRAM_ID,
+    keys: [
+      { pubkey: args.newOperator, isSigner: true, isWritable: false },
+      { pubkey: args.table, isSigner: false, isWritable: true },
+    ],
+    data: IX.acceptOperator,
   });
 }
 

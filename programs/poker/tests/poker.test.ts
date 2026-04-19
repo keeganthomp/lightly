@@ -8,15 +8,18 @@
  * All in-process LiteSVM — fast enough to expand further without CI pain.
  */
 import { describe, test, expect } from "bun:test";
-import { PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import {
   POKER_PROGRAM_ID,
   ataFor,
+  ixAcceptOperator,
   ixBeginHand,
   ixBuyIn,
   ixCashOut,
   ixEmergencyTimeoutRefund,
   ixInitializeTable,
+  ixProposeOperator,
+  ixSetPaused,
   ixSettleHand,
   ixWithdrawRake,
   receiptPda,
@@ -625,5 +628,234 @@ describe("invariants", () => {
       const vaultBal = h.tokenBalance(vaultAta);
       expect(seatSum + rakeAccrued).toBe(vaultBal);
     }
+  });
+});
+
+// ---------- Attack-path / security tests added in audit round ----------
+
+describe("rake cap (audit)", () => {
+  test("operator CANNOT confiscate the pot by setting rake = total_debit", () => {
+    const h = bootstrap({ numPlayers: 2 });
+    const table = initTable(h);
+    const [p1, p2] = h.players as [Keypair, Keypair];
+    for (const p of [p1, p2]) {
+      assertSuccess(
+        h.send(
+          [ixBuyIn({ player: p.publicKey, table, tokenMint: h.mint, amount: 100_000_000n })],
+          [p],
+        ),
+      );
+    }
+    const seats = [p1, p2].map((p) => seatPda(table, p.publicKey)[0]);
+    assertSuccess(
+      h.send(
+        [ixBeginHand({ operator: h.operator.publicKey, table, handId: 1n, seats })],
+        [h.operator],
+      ),
+    );
+    // Pot = 40 USDC. Rake cap @ 250 bps (2.5%) = 1 USDC. Try 40 USDC rake — must fail.
+    const deltas = [
+      { player: p1.publicKey, debit: 20_000_000n, credit: 0n },
+      { player: p2.publicKey, debit: 20_000_000n, credit: 0n },
+    ];
+    const res = h.send(
+      [ixSettleHand({ operator: h.operator.publicKey, table, handId: 1n, deltas, rake: 40_000_000n })],
+      [h.operator],
+    );
+    // RakeExceedsCap = ordinal 22
+    assertFailure(res, anchorErr(22));
+  });
+
+  test("rake exactly at cap is allowed", () => {
+    const h = bootstrap({ numPlayers: 2 });
+    const table = initTable(h);
+    const [p1, p2] = h.players as [Keypair, Keypair];
+    for (const p of [p1, p2]) {
+      assertSuccess(
+        h.send(
+          [ixBuyIn({ player: p.publicKey, table, tokenMint: h.mint, amount: 100_000_000n })],
+          [p],
+        ),
+      );
+    }
+    const seats = [p1, p2].map((p) => seatPda(table, p.publicKey)[0]);
+    assertSuccess(
+      h.send(
+        [ixBeginHand({ operator: h.operator.publicKey, table, handId: 1n, seats })],
+        [h.operator],
+      ),
+    );
+    // 2.5% of 40 USDC = 1 USDC — exactly allowed.
+    const deltas = [
+      { player: p1.publicKey, debit: 20_000_000n, credit: 0n },
+      { player: p2.publicKey, debit: 20_000_000n, credit: 39_000_000n },
+    ];
+    assertSuccess(
+      h.send(
+        [ixSettleHand({ operator: h.operator.publicKey, table, handId: 1n, deltas, rake: 1_000_000n })],
+        [h.operator],
+      ),
+    );
+  });
+});
+
+describe("buy_in lock (audit)", () => {
+  test("cannot top-up a seat while it is locked in a hand", () => {
+    const h = bootstrap({ numPlayers: 2 });
+    const table = initTable(h);
+    const [p1, p2] = h.players as [Keypair, Keypair];
+    for (const p of [p1, p2]) {
+      assertSuccess(
+        h.send(
+          [ixBuyIn({ player: p.publicKey, table, tokenMint: h.mint, amount: 100_000_000n })],
+          [p],
+        ),
+      );
+    }
+    const seats = [p1, p2].map((p) => seatPda(table, p.publicKey)[0]);
+    assertSuccess(
+      h.send(
+        [ixBeginHand({ operator: h.operator.publicKey, table, handId: 1n, seats })],
+        [h.operator],
+      ),
+    );
+    const res = h.send(
+      [ixBuyIn({ player: p1.publicKey, table, tokenMint: h.mint, amount: 10_000_000n })],
+      [p1],
+    );
+    // SeatLocked = ordinal 7
+    assertFailure(res, anchorErr(7));
+  });
+});
+
+describe("pause (audit)", () => {
+  test("paused table blocks buy_in and begin_hand but not cash_out", () => {
+    const h = bootstrap({ numPlayers: 2 });
+    const table = initTable(h);
+    const [p1] = h.players as [Keypair];
+    assertSuccess(
+      h.send(
+        [ixBuyIn({ player: p1.publicKey, table, tokenMint: h.mint, amount: 100_000_000n })],
+        [p1],
+      ),
+    );
+    assertSuccess(
+      h.send(
+        [ixSetPaused({ operator: h.operator.publicKey, table, paused: true })],
+        [h.operator],
+      ),
+    );
+    const buy = h.send(
+      [ixBuyIn({ player: p1.publicKey, table, tokenMint: h.mint, amount: 10_000_000n })],
+      [p1],
+    );
+    // TablePaused = ordinal 23
+    assertFailure(buy, anchorErr(23));
+    const begin = h.send(
+      [ixBeginHand({ operator: h.operator.publicKey, table, handId: 1n, seats: [seatPda(table, p1.publicKey)[0]] })],
+      [h.operator],
+    );
+    assertFailure(begin, anchorErr(23));
+    // cash_out should still work — players are never stuck when paused.
+    assertSuccess(
+      h.send(
+        [ixCashOut({ player: p1.publicKey, table, tokenMint: h.mint, amount: 10_000_000n })],
+        [p1],
+      ),
+    );
+  });
+
+  test("set_paused rejected from non-operator", () => {
+    const h = bootstrap({ numPlayers: 1 });
+    const table = initTable(h);
+    const p1 = h.players[0]!;
+    const res = h.send(
+      [ixSetPaused({ operator: p1.publicKey, table, paused: true })],
+      [p1],
+    );
+    expect(isFailed(res)).toBe(true);
+  });
+});
+
+describe("operator rotation (audit)", () => {
+  test("two-step rotation: propose then accept", () => {
+    const h = bootstrap();
+    const table = initTable(h);
+    const newOp = Keypair.generate();
+    h.svm.airdrop(newOp.publicKey, 1_000_000_000n);
+
+    // Propose
+    assertSuccess(
+      h.send(
+        [ixProposeOperator({ operator: h.operator.publicKey, table, newOperator: newOp.publicKey })],
+        [h.operator],
+      ),
+    );
+    expect(h.fetchTable(table).pendingOperator.equals(newOp.publicKey)).toBe(true);
+    expect(h.fetchTable(table).operator.equals(h.operator.publicKey)).toBe(true);
+
+    // Accept from the new operator
+    assertSuccess(
+      h.send([ixAcceptOperator({ newOperator: newOp.publicKey, table })], [newOp]),
+    );
+    expect(h.fetchTable(table).operator.equals(newOp.publicKey)).toBe(true);
+    expect(h.fetchTable(table).pendingOperator.equals(PublicKey.default)).toBe(true);
+  });
+
+  test("accept_operator rejected when caller is not the pending operator", () => {
+    const h = bootstrap();
+    const table = initTable(h);
+    const newOp = Keypair.generate();
+    const impostor = Keypair.generate();
+    h.svm.airdrop(newOp.publicKey, 1_000_000_000n);
+    h.svm.airdrop(impostor.publicKey, 1_000_000_000n);
+    assertSuccess(
+      h.send(
+        [ixProposeOperator({ operator: h.operator.publicKey, table, newOperator: newOp.publicKey })],
+        [h.operator],
+      ),
+    );
+    const res = h.send([ixAcceptOperator({ newOperator: impostor.publicKey, table })], [impostor]);
+    // NotPendingOperator = ordinal 24
+    assertFailure(res, anchorErr(24));
+  });
+
+  test("after rotation old operator cannot settle", () => {
+    const h = bootstrap({ numPlayers: 2 });
+    const table = initTable(h);
+    const [p1, p2] = h.players as [Keypair, Keypair];
+    for (const p of [p1, p2]) {
+      assertSuccess(
+        h.send(
+          [ixBuyIn({ player: p.publicKey, table, tokenMint: h.mint, amount: 100_000_000n })],
+          [p],
+        ),
+      );
+    }
+    const newOp = Keypair.generate();
+    h.svm.airdrop(newOp.publicKey, 1_000_000_000n);
+    assertSuccess(
+      h.send(
+        [ixProposeOperator({ operator: h.operator.publicKey, table, newOperator: newOp.publicKey })],
+        [h.operator],
+      ),
+    );
+    assertSuccess(h.send([ixAcceptOperator({ newOperator: newOp.publicKey, table })], [newOp]));
+
+    const seats = [p1, p2].map((p) => seatPda(table, p.publicKey)[0]);
+    // Old operator tries to begin_hand — must fail.
+    const res = h.send(
+      [ixBeginHand({ operator: h.operator.publicKey, table, handId: 1n, seats })],
+      [h.operator],
+    );
+    expect(isFailed(res)).toBe(true);
+
+    // New operator can.
+    assertSuccess(
+      h.send(
+        [ixBeginHand({ operator: newOp.publicKey, table, handId: 1n, seats })],
+        [newOp],
+      ),
+    );
   });
 });

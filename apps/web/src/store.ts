@@ -9,8 +9,15 @@ type S = {
   connected: boolean;
   lastSeed?: string;
   lastWinners?: Array<{ seat: number; amount: number }>;
+  /** Transient showdown reveal kept for a few seconds for the win animation. */
+  reveal?: {
+    reveals: Array<{ seat: number; hole: [import("@lightly/shared").Card, import("@lightly/shared").Card]; rank: import("@lightly/shared").HandRank }>;
+    winners: Array<{ seat: number; amount: number }>;
+    seed: string;
+  };
   apply: (e: ServerEvent) => void;
   setConnected: (v: boolean) => void;
+  clearReveal: () => void;
   reset: () => void;
 };
 
@@ -57,14 +64,28 @@ export const useGame = create<S>((set) => ({
           break;
         case "showdown":
           push(`showdown — seed ${e.seed.slice(0, 12)}…`, "info");
-          return { ...s, view, log, lastSeed: e.seed };
+          // Reveal cards of every contender on the board; drives the reveal animation.
+          if (view) {
+            const seats = view.seats.map((seat) => {
+              const r = e.reveals.find((rv) => rv.seat === seat.seatIndex);
+              return r ? { ...seat, hole: r.hole } : seat;
+            });
+            view = { ...view, seats };
+          }
+          return { ...s, view, log, lastSeed: e.seed, reveal: { reveals: e.reveals, winners: [], seed: e.seed } };
         case "settled":
           push(
             `settled: ${e.winners.map((w) => `seat ${w.seat} +${(w.amount / 1e6).toFixed(2)}`).join(", ")}` +
               (e.rake > 0 ? `, rake ${(e.rake / 1e6).toFixed(2)}` : ""),
             "info",
           );
-          return { ...s, view, log, lastWinners: e.winners };
+          return {
+            ...s,
+            view,
+            log,
+            lastWinners: e.winners,
+            reveal: s.reveal ? { ...s.reveal, winners: e.winners } : undefined,
+          };
         case "error":
           push(`error: ${e.message}`, "info");
           break;
@@ -72,5 +93,6 @@ export const useGame = create<S>((set) => ({
       return { ...s, view, log };
     }),
   setConnected: (v) => set({ connected: v }),
-  reset: () => set({ view: null, log: [], connected: false, lastSeed: undefined, lastWinners: undefined }),
+  clearReveal: () => set((s) => ({ ...s, reveal: undefined })),
+  reset: () => set({ view: null, log: [], connected: false, lastSeed: undefined, lastWinners: undefined, reveal: undefined }),
 }));

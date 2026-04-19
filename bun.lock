@@ -27,6 +27,18 @@
         "typescript": "^5.7.0",
       },
     },
+    "apps/api/tests": {
+      "name": "@lightly/api-tests",
+      "version": "0.1.0",
+      "dependencies": {
+        "@lightly/api": "workspace:*",
+        "@lightly/shared": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.2.0",
+        "typescript": "^5.7.0",
+      },
+    },
     "apps/web": {
       "name": "@lightly/web",
       "version": "0.1.0",
@@ -258,6 +270,8 @@
     "@ledgerhq/logs": ["@ledgerhq/logs@6.17.0", "", {}, "sha512-yra33g5q/AU7+PwAws+GaVpQGUuxnDREjVBnviJjcaJLVKuLzI4pnj8Bd3nY3fypM5k1yZEYKEXfUuGFUjP2+w=="],
 
     "@lightly/api": ["@lightly/api@workspace:apps/api"],
+
+    "@lightly/api-tests": ["@lightly/api-tests@workspace:apps/api/tests"],
 
     "@lightly/db": ["@lightly/db@workspace:packages/db"],
 

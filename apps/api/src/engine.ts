@@ -128,6 +128,30 @@ export class HoldemEngine {
     }
   }
 
+  /**
+   * Safer leave: if the player is in an active hand, fold them (their committed
+   * chips stay in the pot as settled by the current hand). Only after the hand
+   * ends do they actually leave the seat. Prevents mid-hand seat withdrawal
+   * from desyncing on-chain settlement.
+   */
+  requestLeave(wallet: string): void {
+    const s = this.seats.find((s) => s.wallet === wallet && s.sitting);
+    if (!s) return;
+    if (this.street === "idle") {
+      this.leaveSeat(wallet);
+      return;
+    }
+    if (!s.folded) {
+      s.folded = true;
+      s.actedThisStreet = true;
+      this.opts.emit({ kind: "action", seat: s.index, action: "fold" });
+      // If this was the player to act, advance.
+      if (this.toAct === s.index) this.advance();
+    }
+    // Seat removal deferred until `goToShowdown` resets street → idle.
+    // (We do NOT un-sit here so the engine can still apply debits to the seat.)
+  }
+
   activeSeats(): Seat[] {
     return this.seats.filter((s) => s.sitting && s.stack > 0);
   }
@@ -361,6 +385,7 @@ export class HoldemEngine {
   private goToShowdown(wonByFold: boolean): void {
     this.street = "showdown";
     this.toAct = null;
+
     const contenders = this.seats.filter((s) => s.sitting && !s.folded);
     const reveals: Array<{ seat: number; hole: [Card, Card]; rank: HandRank }> = [];
     for (const c of contenders) {
@@ -371,24 +396,99 @@ export class HoldemEngine {
       reveals.push({ seat: c.index, hole: c.hole, rank });
     }
 
-    // Pot + side-pot math (simple: single-pot or chop between equal-rank contenders).
-    const sorted = reveals.slice().sort((a, b) => b.rank.score - a.rank.score);
-    const top = sorted[0]!.rank.score;
-    const winners = sorted.filter((r) => r.rank.score === top);
     const rake = Math.floor((this.pot * this.opts.config.rakeBps) / 10_000);
     const payable = this.pot - rake;
-    const per = Math.floor(payable / winners.length);
-    const rem = payable - per * winners.length; // award remainder to first winner
 
-    const winnerSeats = winners.map((w, i) => ({ seat: w.seat, amount: per + (i === 0 ? rem : 0) }));
+    // ---------- Side-pot math (handles all-in partial contributions) ----------
+    //
+    // Build tiered pots keyed by each distinct committedThisHand value. Each
+    // tier pays out only to contenders who contributed at or above that tier.
+    // This avoids the classic "short-stack overpaid" bug.
+    const all = this.seats.filter((s) => s.sitting && s.committedThisHand > 0);
+    const contenderIdx = new Set(contenders.map((c) => c.index));
+    const revealBySeat = new Map(reveals.map((r) => [r.seat, r]));
 
-    // Build deltas: every contender was debited what they committed this hand.
-    const deltas = this.seats
-      .filter((s) => s.sitting && s.committedThisHand > 0)
-      .map((s) => {
-        const credit = winnerSeats.find((w) => w.seat === s.index)?.amount ?? 0;
-        return { wallet: s.wallet, debit: s.committedThisHand, credit };
+    const tierLevels = [...new Set(all.map((s) => s.committedThisHand))].sort((a, b) => a - b);
+    const winnersBySeat = new Map<number, number>(); // seat → amount
+
+    let prevLevel = 0;
+    let remainingRakeable = payable;
+    for (const level of tierLevels) {
+      const slice = level - prevLevel;
+      // Everyone who committed >= level contributes `slice` to this sub-pot.
+      const contributorsAtLevel = all.filter((s) => s.committedThisHand >= level).length;
+      let subPot = slice * contributorsAtLevel;
+      // Apply rake proportionally — only to the paid-out portion.
+      const subRakeShare = Math.floor((subPot * this.opts.config.rakeBps) / 10_000);
+      subPot -= subRakeShare;
+      remainingRakeable -= subPot;
+
+      // Only contenders whose commit >= level can win this sub-pot.
+      const eligibleReveals = reveals.filter(
+        (r) => contenderIdx.has(r.seat) && (this.seats[r.seat]!.committedThisHand >= level),
+      );
+      if (eligibleReveals.length === 0) {
+        // No contender reached this tier — shouldn't happen in practice, fold rake into remainder.
+        remainingRakeable += subPot;
+        prevLevel = level;
+        continue;
+      }
+      const top = Math.max(...eligibleReveals.map((r) => r.rank.score));
+      const subWinners = eligibleReveals.filter((r) => r.rank.score === top);
+      const per = Math.floor(subPot / subWinners.length);
+      const rem = subPot - per * subWinners.length;
+      subWinners.forEach((w, i) => {
+        const prev = winnersBySeat.get(w.seat) ?? 0;
+        winnersBySeat.set(w.seat, prev + per + (i === 0 ? rem : 0));
       });
+      prevLevel = level;
+    }
+
+    // Any payable dust left over (can occur via rounding on proportional rake).
+    if (remainingRakeable > 0 && reveals.length > 0) {
+      // Hand it to the top-ranked overall contender.
+      const top = Math.max(...reveals.map((r) => r.rank.score));
+      const topWinner = reveals.find((r) => r.rank.score === top)!;
+      winnersBySeat.set(topWinner.seat, (winnersBySeat.get(topWinner.seat) ?? 0) + remainingRakeable);
+    }
+
+    const winnerSeats = [...winnersBySeat.entries()].map(([seat, amount]) => ({ seat, amount }));
+
+    // Build deltas: every contributor was debited what they committed this hand.
+    const deltas = all.map((s) => {
+      const credit = winnersBySeat.get(s.index) ?? 0;
+      return { wallet: s.wallet, debit: s.committedThisHand, credit };
+    });
+
+    // Sanity invariant the operator will also be charged with on-chain:
+    // sum(debits) == sum(credits) + rake. We must not emit an outcome that
+    // the program would reject.
+    const totalDebit = deltas.reduce((a, d) => a + d.debit, 0);
+    const totalCredit = deltas.reduce((a, d) => a + d.credit, 0);
+    if (totalDebit !== totalCredit + rake) {
+      this.opts.emit({
+        kind: "error",
+        message: `engine bug: debits=${totalDebit} credits+rake=${totalCredit + rake} — hand aborted`,
+      });
+      // Refund everyone by giving back their committedThisHand.
+      const abortDeltas = all.map((s) => ({
+        wallet: s.wallet,
+        debit: s.committedThisHand,
+        credit: s.committedThisHand,
+      }));
+      this.opts.onHandComplete({
+        handId: this.handId,
+        seedHex: this.seedHex,
+        vrfProof: this.vrfProof,
+        commitHashHex: this.commitHashHex,
+        deltas: abortDeltas,
+        rake: 0,
+        winners: [],
+        reveals,
+      });
+      this.street = "idle";
+      return;
+    }
 
     this.opts.emit({
       kind: "showdown",
@@ -408,7 +508,6 @@ export class HoldemEngine {
       reveals,
     });
 
-    // Apply the credits locally so subsequent hands have updated stacks
     for (const w of winnerSeats) {
       const seat = this.seats[w.seat]!;
       seat.stack += w.amount;

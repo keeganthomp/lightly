@@ -56,6 +56,8 @@ pub mod poker {
         table.dispute_window_slots = dispute_window_slots;
         table.rake_accrued = 0;
         table.active_hand_id = 0;
+        table.paused = false;
+        table.pending_operator = Pubkey::default();
         table.bump = ctx.bumps.table;
 
         emit!(TableInitialized {
@@ -70,8 +72,12 @@ pub mod poker {
     /// Player deposits `amount` of the table's token into the vault.
     pub fn buy_in(ctx: Context<BuyIn>, amount: u64) -> Result<()> {
         let table = &ctx.accounts.table;
+        require!(!table.paused, PokerError::TablePaused);
         require!(amount >= table.min_buy_in, PokerError::BuyInTooSmall);
         let seat = &mut ctx.accounts.seat;
+        // Refuse top-ups mid-hand — prevents players from changing stack size
+        // after actions are locked in off-chain.
+        require!(seat.locked_hand_id == 0, PokerError::SeatLocked);
         let new_balance = seat
             .balance
             .checked_add(amount)
@@ -151,6 +157,7 @@ pub mod poker {
         ctx: Context<'_, '_, 'info, 'info, BeginHand<'info>>,
         hand_id: u64,
     ) -> Result<()> {
+        require!(!ctx.accounts.table.paused, PokerError::TablePaused);
         require!(hand_id > 0, PokerError::InvalidHandId);
         require!(
             hand_id > ctx.accounts.table.active_hand_id,
@@ -238,6 +245,15 @@ pub mod poker {
 
         let credit_plus_rake = total_credit.checked_add(rake).ok_or(PokerError::Overflow)?;
         require_eq!(total_debit, credit_plus_rake, PokerError::PotMismatch);
+
+        // Enforce per-hand rake cap. Without this, a malicious operator could set
+        // credits = 0 and rake = total_debit, confiscating the entire pot.
+        let max_rake = (total_debit as u128)
+            .checked_mul(ctx.accounts.table.rake_bps as u128)
+            .ok_or(PokerError::Overflow)?
+            .checked_div(BPS_DENOMINATOR as u128)
+            .ok_or(PokerError::Overflow)? as u64;
+        require!(rake <= max_rake, PokerError::RakeExceedsCap);
 
         let table = &mut ctx.accounts.table;
         table.rake_accrued = table
@@ -339,6 +355,38 @@ pub mod poker {
         emit!(RakeWithdrawn { table: table_key, amount });
         Ok(())
     }
+
+    /// Operator pauses (or unpauses) the table. `begin_hand` and `buy_in` are
+    /// blocked while paused. `cash_out`, `settle_hand`, and
+    /// `emergency_timeout_refund` remain available so players are never stuck.
+    pub fn set_paused(ctx: Context<SetPaused>, paused: bool) -> Result<()> {
+        ctx.accounts.table.paused = paused;
+        emit!(PausedChanged { table: ctx.accounts.table.key(), paused });
+        Ok(())
+    }
+
+    /// Operator nominates a new operator. Rotation requires the nominee to call
+    /// `accept_operator` — two-step hand-off prevents fat-finger to a dead key.
+    pub fn propose_operator(ctx: Context<ProposeOperator>, new_operator: Pubkey) -> Result<()> {
+        ctx.accounts.table.pending_operator = new_operator;
+        emit!(OperatorProposed { table: ctx.accounts.table.key(), pending: new_operator });
+        Ok(())
+    }
+
+    /// Pending operator accepts the handoff. No other account is touched.
+    pub fn accept_operator(ctx: Context<AcceptOperator>) -> Result<()> {
+        let table = &mut ctx.accounts.table;
+        require_keys_eq!(
+            ctx.accounts.new_operator.key(),
+            table.pending_operator,
+            PokerError::NotPendingOperator
+        );
+        let old = table.operator;
+        table.operator = table.pending_operator;
+        table.pending_operator = Pubkey::default();
+        emit!(OperatorRotated { table: table.key(), old, new: table.operator });
+        Ok(())
+    }
 }
 
 // ---------- Accounts ----------
@@ -348,6 +396,7 @@ pub mod poker {
 pub struct Table {
     pub id: u64,
     pub operator: Pubkey,
+    pub pending_operator: Pubkey,  // two-step operator rotation; default = Pubkey::default()
     pub token_mint: Pubkey,
     pub token_program: Pubkey,
     pub min_buy_in: u64,
@@ -358,6 +407,7 @@ pub struct Table {
     pub dispute_window_slots: u64,
     pub rake_accrued: u64,
     pub active_hand_id: u64,
+    pub paused: bool,
     pub bump: u8,
 }
 
@@ -627,6 +677,44 @@ pub struct WithdrawRake<'info> {
     pub token_program: Interface<'info, TokenInterface>,
 }
 
+#[derive(Accounts)]
+pub struct SetPaused<'info> {
+    pub operator: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"table".as_ref(), table.id.to_le_bytes().as_ref()],
+        bump = table.bump,
+        has_one = operator,
+    )]
+    pub table: Account<'info, Table>,
+}
+
+#[derive(Accounts)]
+pub struct ProposeOperator<'info> {
+    pub operator: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"table".as_ref(), table.id.to_le_bytes().as_ref()],
+        bump = table.bump,
+        has_one = operator,
+    )]
+    pub table: Account<'info, Table>,
+}
+
+#[derive(Accounts)]
+pub struct AcceptOperator<'info> {
+    pub new_operator: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"table".as_ref(), table.id.to_le_bytes().as_ref()],
+        bump = table.bump,
+    )]
+    pub table: Account<'info, Table>,
+}
+
 // ---------- Events ----------
 
 #[event]
@@ -681,6 +769,25 @@ pub struct RakeWithdrawn {
     pub amount: u64,
 }
 
+#[event]
+pub struct PausedChanged {
+    pub table: Pubkey,
+    pub paused: bool,
+}
+
+#[event]
+pub struct OperatorProposed {
+    pub table: Pubkey,
+    pub pending: Pubkey,
+}
+
+#[event]
+pub struct OperatorRotated {
+    pub table: Pubkey,
+    pub old: Pubkey,
+    pub new: Pubkey,
+}
+
 // ---------- Errors ----------
 
 #[error_code]
@@ -729,4 +836,10 @@ pub enum PokerError {
     DisputeWindowActive,
     #[msg("rake accrued is less than requested amount")]
     InsufficientRake,
+    #[msg("rake exceeds per-hand cap (rake_bps of pot)")]
+    RakeExceedsCap,
+    #[msg("table is paused")]
+    TablePaused,
+    #[msg("not the pending operator")]
+    NotPendingOperator,
 }

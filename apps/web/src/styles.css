@@ -176,10 +176,40 @@ button.danger { background: var(--danger); border-color: var(--danger); color: w
   animation: pulse 1.2s ease-in-out infinite;
   pointer-events: none;
 }
+.seat.me:hover .hole-row .card {
+  transform: translateY(-4px) scale(1.05);
+  box-shadow: 0 10px 24px -6px rgba(0, 0, 0, 0.7);
+}
+.seat .hole-row .card {
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 180ms ease;
+}
+.seat.winner {
+  z-index: 4;
+}
+.seat.winner .pill.stack {
+  border-color: var(--win);
+  box-shadow: 0 0 24px rgba(74,222,128,0.45);
+}
 @keyframes pulse {
   0%, 100% { opacity: 0.9; transform: scale(1); }
   50%      { opacity: 0.3; transform: scale(1.03); }
 }
+
+/* Toast / snackbar for settlement confirmations */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 12px 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+  z-index: 20;
+}
+.toast.win { border-color: var(--win); color: var(--win); }
+.toast.err { border-color: var(--danger); color: var(--danger); }
 
 /* Cards */
 .card {
@@ -271,7 +301,8 @@ button.danger { background: var(--danger); border-color: var(--danger); color: w
   height: 3px;
   background: var(--accent-2);
   transform-origin: left;
-  transition: transform 1s linear;
+  transition: transform 120ms linear, background-color 400ms ease;
+  border-radius: 0 2px 2px 0;
 }
 
 /* Commit badge — shows the VRF commit hash mid-hand, revealed on showdown */
