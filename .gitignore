@@ -1,0 +1,32 @@
+node_modules
+dist
+build
+.turbo
+.env
+.env.*
+!.env.example
+
+# Rust / Anchor
+target
+Cargo.lock
+programs/**/target
+.anchor
+test-ledger
+
+# Surfpool
+.surfpool
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Build outputs
+packages/idl/generated
