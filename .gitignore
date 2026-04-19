@@ -30,3 +30,8 @@ npm-debug.log*
 
 # Build outputs
 packages/idl/generated
+apps/web/dist-node
+apps/web/vite.config.js
+apps/web/vite.config.d.ts
+apps/web/tsconfig.node.tsbuildinfo
+**/*.tsbuildinfo
