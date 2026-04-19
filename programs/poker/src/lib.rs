@@ -472,6 +472,13 @@ pub struct InitializeTable<'info> {
     )]
     pub vault: InterfaceAccount<'info, TokenAccount>,
 
+    // MVP: restrict to classic SPL Token. Token-2022 support requires an
+    // extension allowlist (reject PermanentDelegate, TransferFee,
+    // DefaultAccountState=Frozen, TransferHook, ConfidentialTransfer,
+    // MintCloseAuthority, NonTransferable) — shipping after audit.
+    #[account(
+        constraint = token_program.key() == anchor_spl::token::ID @ PokerError::UnsupportedTokenProgram,
+    )]
     pub token_program: Interface<'info, TokenInterface>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
@@ -842,4 +849,6 @@ pub enum PokerError {
     TablePaused,
     #[msg("not the pending operator")]
     NotPendingOperator,
+    #[msg("token program is not allowed (MVP: classic SPL only)")]
+    UnsupportedTokenProgram,
 }
