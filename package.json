@@ -17,6 +17,8 @@
     "program:build": "cd programs/poker && cargo-build-sbf",
     "program:test": "bun test programs/poker/tests/*.test.ts",
     "surfpool": "surfpool start",
+    "skills:install": "npx -y skills sync",
+    "bootstrap": "bun run scripts/bootstrap.ts",
     "idl:generate": "cd programs/poker && anchor idl build -o ../../packages/idl/poker.json && bun run idl:client",
     "idl:client": "codama run ts --path packages/idl/poker.json --output packages/idl/generated"
   },

@@ -24,6 +24,7 @@ import { zAction, type ServerEvent } from "@lightly/shared";
 import { decodeSeat, seatPda } from "@lightly/idl";
 import { HoldemEngine, type HandOutcome, type TableConfig } from "./engine.ts";
 import { issueNonce, resolveSession, revokeSession, verifyAndIssueSession } from "./auth.ts";
+import { Chain, loadChainConfig } from "./chain.ts";
 
 const app = new Hono();
 app.use("*", cors({ origin: "*", credentials: true }));
@@ -48,8 +49,15 @@ type SocketData = { tableId: string; wallet: string; sessionId: string };
 // If RPC_URL is set, we fetch each joining player's on-chain PlayerSeat PDA and
 // require a nonzero balance. In dev without a validator, we skip the check.
 
-const RPC_URL = process.env.RPC_URL ?? "";
-const rpc = RPC_URL ? new Connection(RPC_URL, "confirmed") : null;
+const chainConfig = loadChainConfig();
+const chain = chainConfig ? new Chain(chainConfig) : null;
+const rpc = chain?.connection ?? null;
+
+if (chain) {
+  chain.health()
+    .then((h) => console.log(`[lightly-api] chain ok slot=${h.slot} solana=${h.version}`))
+    .catch((e) => console.error(`[lightly-api] chain health failed:`, (e as Error).message));
+}
 
 async function fetchOnchainBalance(tablePda: PublicKey, wallet: string): Promise<bigint | null> {
   if (!rpc) return null; // skip check in dev without validator
@@ -63,6 +71,44 @@ async function fetchOnchainBalance(tablePda: PublicKey, wallet: string): Promise
 // ---------- Health ----------
 
 app.get("/health", (c) => c.json({ ok: true, tables: tables.size, rpc: !!rpc }));
+
+/**
+ * Surface the chain wiring so the UI doesn't have to hardcode program IDs.
+ * Returns the RPC URL, program ID, and per-table PDA / mint info.
+ */
+app.get("/config", (c) => {
+  const t = [...tables.values()][0];
+  return c.json({
+    rpcUrl: process.env.PUBLIC_RPC_URL ?? process.env.RPC_URL ?? null,
+    chainEnabled: !!chain,
+    programId: "9FeibPV2hjbkcu4YHSnUMr9ikWV7QLWMmBpVFZAcYsZH",
+    defaultTable: t
+      ? {
+          tableId: t.config.tableId,
+          onchainTableId: String(t.onchainTableId),
+          tablePda: t.tablePda.toBase58(),
+          mint: t.mint,
+          minBuyIn: String(t.config.minBuyIn),
+          maxBuyIn: String(t.config.maxBuyIn),
+          bigBlind: String(t.config.bigBlind),
+        }
+      : null,
+  });
+});
+
+/**
+ * Fetch the on-chain PlayerSeat for a given table + wallet. UI polls this
+ * after a buy-in to know when the deposit is confirmed.
+ */
+app.get("/tables/:id/seat/:wallet", async (c) => {
+  const id = c.req.param("id");
+  const table = tables.get(id);
+  if (!table) throw new HTTPException(404);
+  if (!rpc) throw new HTTPException(503, { message: "rpc disabled" });
+  const wallet = z_wallet(c.req.param("wallet"));
+  const bal = await fetchOnchainBalance(table.tablePda, wallet);
+  return c.json({ balance: bal === null ? null : String(bal) });
+});
 
 // ---------- Tables ----------
 
@@ -134,15 +180,47 @@ function createTableEntry(
       return buf;
     },
     emit,
-    onHandComplete: (outcome: HandOutcome) => {
-      // In prod: submit begin_hand + settle_hand on-chain here (via Helius Sender,
-      // Jito-bundled, operator multisig signer). For the MVP we emit a stub.
-      emit({
-        kind: "settled",
-        winners: outcome.winners,
-        rake: outcome.rake,
-        txSig: `stub-${outcome.handId}`,
-      });
+    onHandBegin: chain
+      ? async (handId, wallets) => {
+          const sig = await chain.submitBeginHand(BigInt(handId), wallets);
+          console.log(`[chain] begin_hand #${handId} → ${sig}`);
+        }
+      : undefined,
+    onHandComplete: async (outcome: HandOutcome) => {
+      if (!chain) {
+        // Off-chain dev: emit a stub.
+        emit({
+          kind: "settled",
+          winners: outcome.winners,
+          rake: outcome.rake,
+          txSig: `stub-${outcome.handId}`,
+        });
+        return;
+      }
+      try {
+        const sig = await chain.submitSettleHand(
+          BigInt(outcome.handId),
+          outcome.deltas.map((d) => ({
+            wallet: d.wallet,
+            debit: BigInt(d.debit),
+            credit: BigInt(d.credit),
+          })),
+          BigInt(outcome.rake),
+        );
+        console.log(`[chain] settle_hand #${outcome.handId} → ${sig}`);
+        emit({
+          kind: "settled",
+          winners: outcome.winners,
+          rake: outcome.rake,
+          txSig: sig,
+        });
+      } catch (e) {
+        console.error(`[chain] settle_hand #${outcome.handId} failed:`, (e as Error).message);
+        emit({
+          kind: "error",
+          message: `settle_hand failed: ${(e as Error).message}. Operator will retry; emergency refund is available.`,
+        });
+      }
     },
   });
   const entry: TableEntry = { config, engine, sockets, walletToSocket, mint, onchainTableId, tablePda };
@@ -254,7 +332,7 @@ Bun.serve<SocketData, undefined>({
       table.engine.setConnected(ws.data.wallet, true);
       ws.send(JSON.stringify({ kind: "snapshot", view: table.engine.view(ws.data.wallet) }));
     },
-    message(ws, raw) {
+    async message(ws, raw) {
       const table = tables.get(ws.data.tableId);
       if (!table) return;
       let parsed;
@@ -270,11 +348,24 @@ Bun.serve<SocketData, undefined>({
             // No-op: on-chain `buy_in` is what creates the seat. UI should call
             // `ready` once they've confirmed their on-chain balance.
             break;
-          case "ready":
+          case "ready": {
             // Seat the player locally using their on-chain balance as stack.
-            // Dev path: we use a hardcoded stack since we don't have RPC wired here.
+            // If chain is disabled, fall back to a generous dev stack.
             if (!table.engine.activeSeats().some((s) => s.wallet === wallet)) {
-              const stack = 500_000_000; // 500 USDC in dev; in prod pull from getAccount
+              let stack = 500_000_000; // 500 USDC dev default
+              if (rpc) {
+                const bal = await fetchOnchainBalance(table.tablePda, wallet);
+                if (bal === null || bal <= 0n) {
+                  ws.send(
+                    JSON.stringify({
+                      kind: "error",
+                      message: "no on-chain balance — please buy in first",
+                    }),
+                  );
+                  break;
+                }
+                stack = Number(bal);
+              }
               try { table.engine.seatPlayer(wallet, stack); }
               catch (e) {
                 ws.send(JSON.stringify({ kind: "error", message: (e as Error).message }));
@@ -291,6 +382,7 @@ Bun.serve<SocketData, undefined>({
               );
             }
             break;
+          }
           case "fold":
           case "check":
           case "call":
@@ -323,4 +415,4 @@ Bun.serve<SocketData, undefined>({
   },
 });
 
-console.log(`[lightly-api] listening on :${PORT}${rpc ? ` rpc=${RPC_URL}` : ""}`);
+console.log(`[lightly-api] listening on :${PORT}${chain ? ` rpc=${chain.config.rpcUrl}` : " (chain disabled)"}`);

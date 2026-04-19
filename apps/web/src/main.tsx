@@ -1,3 +1,7 @@
+import { Buffer } from "buffer";
+// Expose Buffer globally so @solana/web3.js + wallet-adapter internals find it.
+(globalThis as unknown as { Buffer: typeof Buffer }).Buffer ??= Buffer;
+
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";

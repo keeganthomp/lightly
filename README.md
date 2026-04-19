@@ -43,15 +43,14 @@ cd programs/poker/tests && bun test
 
 Covers every instruction's happy path, attack paths (wrong signer, replay, locked-seat cash_out, rake cap, pot math), and the conservation invariant across 5 hands.
 
-## Local dev
+## Local dev (end-to-end on real chain)
 
 ### Prereqs
 
-- `solana` CLI 3.x (includes `cargo-build-sbf`)
-- `surfpool` (`cargo install surfpool-cli --locked`)
+- `solana` CLI 3.x (ships `cargo-build-sbf`, `solana-test-validator`, `solana-keygen`)
 - `bun` ≥ 1.2
 
-### Build the program
+### 1. Build the program
 
 ```bash
 cargo-build-sbf
@@ -59,26 +58,45 @@ cargo-build-sbf
 # program id: 9FeibPV2hjbkcu4YHSnUMr9ikWV7QLWMmBpVFZAcYsZH
 ```
 
-### Run a local validator (surfpool)
+### 2. Start a local validator
 
-Surfpool boots a mainnet-cloning local validator and deploys the program automatically using `Surfpool.toml`:
+Surfpool 0.1 has a narrow RPC subset. For a real dev loop use the Solana test validator:
 
 ```bash
-surfpool start
+solana-test-validator --reset \
+  --bpf-program 9FeibPV2hjbkcu4YHSnUMr9ikWV7QLWMmBpVFZAcYsZH target/deploy/poker.so
 # RPC: http://127.0.0.1:8899
-# WS:  ws://127.0.0.1:8900
-# USDC mint (classic SPL, cloned): EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 ```
 
-### Run the stack
+(When surfpool supports `--bpf-program` + full RPC it will be the preferred option — see `Surfpool.toml` placeholder.)
+
+### 3. Bootstrap a mint + table
+
+```bash
+bun run scripts/bootstrap.ts
+# Airdrops SOL to the operator keypair, creates a dev-USDC mint,
+# initializes table id=1, and prints the env vars you need.
+```
+
+Copy the printed env vars into `apps/api/.env` and `apps/web/.env`.
+
+To fund a specific wallet (e.g. your Phantom):
+
+```bash
+bun run scripts/bootstrap.ts --player=<your-wallet-pubkey> --amount=1000
+```
+
+### 4. Run the API + UI
 
 ```bash
 bun install
-bun --filter @lightly/api dev      # API on :4000
-bun --filter @lightly/web dev      # Vite on :5173, proxies /api and /ws
+bun --filter @lightly/api dev      # API on :4000 — now submits begin_hand + settle_hand
+bun --filter @lightly/web dev      # Vite on :5173
 ```
 
-Open http://localhost:5173, connect Phantom/Solflare, click **Start hand**.
+Open http://localhost:5173 → connect Phantom → sign the SIWS challenge → use the **Deposit** button to buy in → click **Start hand** → play.
+
+On hand end, `settle_hand` lands on-chain. You'll see the tx sig in the API logs and your seat balance updates.
 
 ## Security notes
 

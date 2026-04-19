@@ -6,6 +6,7 @@ import type { Action, ServerEvent } from "@lightly/shared";
 import { Table } from "./Table.tsx";
 import { useGame } from "./store.ts";
 import { clearSession, getSession, signIn } from "./auth.ts";
+import { WalletPanel } from "./Wallet.tsx";
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:4000";
 const DEFAULT_TABLE = "demo";
@@ -64,7 +65,7 @@ export function App() {
   return (
     <>
       <header className="topbar">
-        <div className="brand"><span>◈</span> Lightly</div>
+        <div className="brand"><span className="mark" aria-hidden /> Lightly</div>
         <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
           <AuthBadge auth={auth} connected={isConnected} onLogout={() => { clearSession(); disconnect(); }} />
           <WalletMultiButton />
@@ -74,6 +75,7 @@ export function App() {
       <div className="main">
         <MainArea auth={auth} wallet={wallet} send={send} />
         <aside className="sidebar">
+          <WalletPanel />
           <section>
             <h3>Controls</h3>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

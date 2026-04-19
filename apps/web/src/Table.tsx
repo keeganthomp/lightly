@@ -28,10 +28,11 @@ export function Table({ tableId, wallet, send }: { tableId: string; wallet: stri
   return (
     <div className="felt">
       <div className="commit" title="sha256(VRF seed) — revealed post-hand">
-        commit: {view.commitHash ? view.commitHash.slice(0, 12) : "—"}
+        <span className="label">commit</span>
+        {view.commitHash ? view.commitHash.slice(0, 12) : "—"}
       </div>
       <div className="table-ellipse" style={{ position: "relative" }}>
-        <div className="table-label">Lightly • {tableId}</div>
+        <div className="table-label">{tableId}</div>
         <Pot amount={view.pot} />
         <Board cards={view.board} />
         {rotated.seats.map((s, i) => (
@@ -56,12 +57,18 @@ function Pot({ amount }: { amount: number }) {
   return (
     <motion.div
       className="pot"
-      key={amount}
-      initial={{ scale: 0.9, opacity: 0.6 }}
-      animate={{ scale: 1, opacity: 1 }}
-      transition={{ duration: 0.2 }}
+      initial={false}
+      animate={{ opacity: 1 }}
     >
-      pot {(amount / 1e6).toFixed(2)}
+      <span className="pot-label">pot</span>
+      <motion.span
+        key={amount}
+        initial={{ y: -4, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={{ duration: 0.22, ease: [0.2, 0.9, 0.2, 1] }}
+      >
+        ${(amount / 1e6).toFixed(2)}
+      </motion.span>
     </motion.div>
   );
 }

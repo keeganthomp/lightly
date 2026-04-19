@@ -62,8 +62,13 @@ type EngineOpts = {
   randomSeed: () => Uint8Array;
   emit: (event: ServerEvent) => void;
   /**
+   * Called BEFORE the deck is dealt. If provided, awaited; if it throws the
+   * hand is aborted. This is the on-chain begin_hand hook.
+   */
+  onHandBegin?: (handId: number, seatedWallets: string[]) => Promise<void>;
+  /**
    * Called once the hand ends. The API worker takes the outcome and submits
-   * begin_hand + settle_hand to the chain, then emits `settled`.
+   * settle_hand to the chain, then emits `settled`.
    */
   onHandComplete: (outcome: HandOutcome) => void;
 };
@@ -198,6 +203,23 @@ export class HoldemEngine {
     this.minRaiseTo = this.opts.config.bigBlind * 2;
     this.board = [];
     this.street = "preflop";
+
+    // On-chain begin_hand hook — must succeed before dealing so the seats
+    // are locked and the chain state matches engine state for the hand id.
+    if (this.opts.onHandBegin) {
+      try {
+        await this.opts.onHandBegin(this.handId, active.map((s) => s.wallet));
+      } catch (e) {
+        this.opts.emit({
+          kind: "error",
+          message: `begin_hand failed, hand aborted: ${(e as Error).message}`,
+        });
+        // Roll back — don't deal, don't charge blinds.
+        this.handId -= 1;
+        this.street = "idle";
+        return;
+      }
+    }
 
     const seed = this.opts.randomSeed();
     this.seedHex = Buffer.from(seed).toString("hex");

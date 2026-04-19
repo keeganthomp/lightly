@@ -12,7 +12,7 @@ import {
   TransactionInstruction,
   type AccountMeta,
 } from "@solana/web3.js";
-import { createHash } from "node:crypto";
+import { Buffer } from "buffer";
 import * as borsh from "borsh";
 
 export const POKER_PROGRAM_ID = new PublicKey(
@@ -33,38 +33,26 @@ export const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
 
 // ---------- Discriminators ----------
 // Anchor prepends sha256("global:<snake_name>")[..8] to every ix data.
-function disc(name: string): Buffer {
-  return createHash("sha256")
-    .update(`global:${name}`)
-    .digest()
-    .subarray(0, 8);
-}
+// Precomputed so the package is pure-JS and browser-friendly (no node:crypto).
+const hx = (s: string) => Buffer.from(s, "hex");
 
 export const IX = {
-  initializeTable: disc("initialize_table"),
-  buyIn: disc("buy_in"),
-  cashOut: disc("cash_out"),
-  beginHand: disc("begin_hand"),
-  settleHand: disc("settle_hand"),
-  emergencyTimeoutRefund: disc("emergency_timeout_refund"),
-  withdrawRake: disc("withdraw_rake"),
-  setPaused: disc("set_paused"),
-  proposeOperator: disc("propose_operator"),
-  acceptOperator: disc("accept_operator"),
+  initializeTable:        hx("df8ff6667ac86c93"),
+  buyIn:                  hx("7e5e85a5a3eca198"),
+  cashOut:                hx("016e393a9f9df3c0"),
+  beginHand:              hx("130fdb851a121fc0"),
+  settleHand:             hx("e28f3ac4944ba42b"),
+  emergencyTimeoutRefund: hx("d7af485597bf46bc"),
+  withdrawRake:           hx("3a4bb0a764120d94"),
+  setPaused:              hx("5b3c7dc0b0e1a6da"),
+  proposeOperator:        hx("2ab78ab0e1001e22"),
+  acceptOperator:         hx("d8b97482fe373980"),
 } as const;
 
-// ---------- Account discriminators ----------
-function accountDisc(name: string): Buffer {
-  return createHash("sha256")
-    .update(`account:${name}`)
-    .digest()
-    .subarray(0, 8);
-}
-
 export const ACCOUNT_DISC = {
-  table: accountDisc("Table"),
-  playerSeat: accountDisc("PlayerSeat"),
-  settlementReceipt: accountDisc("SettlementReceipt"),
+  table:              hx("22648a61ec81e670"),
+  playerSeat:         hx("64feb3430896eee8"),
+  settlementReceipt:  hx("34f9fc7904e8bb04"),
 } as const;
 
 // ---------- PDA derivations ----------
@@ -519,19 +507,19 @@ export function ixAcceptOperator(args: {
 // ---------- Encoding helpers ----------
 
 export function u64Le(n: bigint): Buffer {
-  const buf = Buffer.allocUnsafe(8);
+  const buf = Buffer.alloc(8);
   buf.writeBigUInt64LE(n);
   return buf;
 }
 
 export function u32Le(n: number): Buffer {
-  const buf = Buffer.allocUnsafe(4);
+  const buf = Buffer.alloc(4);
   buf.writeUInt32LE(n);
   return buf;
 }
 
 export function u16Le(n: number): Buffer {
-  const buf = Buffer.allocUnsafe(2);
+  const buf = Buffer.alloc(2);
   buf.writeUInt16LE(n);
   return buf;
 }

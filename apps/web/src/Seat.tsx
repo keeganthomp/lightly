@@ -49,10 +49,10 @@ export function Seat({
         </AnimatePresence>
       </div>
       <div className="pill stack">
-        <span style={{ color: "var(--text-dim)", marginRight: 8 }}>
+        <span className="wallet">
           {seat.wallet ? truncate(seat.wallet) : "empty"}
         </span>
-        {(seat.stack / 1e6).toFixed(2)}
+        ${(seat.stack / 1e6).toFixed(2)}
       </div>
       <div className="hole-row">
         {seat.hole && seat.hole[0] && seat.hole[1] ? (

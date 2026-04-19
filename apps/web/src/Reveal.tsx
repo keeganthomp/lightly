@@ -48,41 +48,40 @@ export function RevealOverlay() {
                       display: "flex",
                       flexDirection: "column",
                       alignItems: "center",
-                      gap: 8,
-                      padding: 12,
-                      borderRadius: 14,
+                      gap: "var(--space-2)",
+                      padding: "var(--space-4)",
+                      borderRadius: "var(--radius-lg)",
                       border: `1px solid ${won ? "var(--win)" : "var(--border)"}`,
-                      background: "rgba(20,20,28,0.85)",
+                      background: "var(--bg-elev)",
                       boxShadow: won
-                        ? "0 0 32px rgba(74,222,128,0.35), 0 0 0 1px rgba(74,222,128,0.25) inset"
-                        : "none",
+                        ? "0 0 0 1px oklch(0.74 0.12 145 / 0.35) inset, 0 12px 30px -10px oklch(0.74 0.12 145 / 0.3)"
+                        : "var(--shadow-card)",
                     }}
                   >
                     <div style={{ display: "flex", gap: 6 }}>
                       <PlayingCard card={r.hole[0]} big delay={i * 0.12} />
                       <PlayingCard card={r.hole[1]} big delay={i * 0.12 + 0.06} />
                     </div>
-                    <div style={{ fontSize: 13, color: "var(--text-dim)" }}>seat {r.seat}</div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: won ? "var(--win)" : "var(--text)" }}>
+                    <div style={{ fontSize: "var(--text-xs)", color: "var(--text-faint)", fontFamily: "var(--font-display)", textTransform: "uppercase", letterSpacing: "0.2em" }}>
+                      seat {r.seat}
+                    </div>
+                    <div style={{ fontSize: "var(--text-sm)", fontWeight: 500, color: won ? "var(--win)" : "var(--text)", fontFamily: "var(--font-display)" }}>
                       {r.rank.category}
                     </div>
                     {won && (
                       <motion.div
-                        initial={{ scale: 0.7, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        transition={{ delay: 0.6 + i * 0.12 }}
+                        initial={{ y: 4, opacity: 0 }}
+                        animate={{ y: 0, opacity: 1 }}
+                        transition={{ delay: 0.6 + i * 0.12, duration: 0.28, ease: [0.2, 0.9, 0.2, 1] }}
                         style={{
-                          fontSize: 13,
+                          fontSize: "var(--text-sm)",
                           color: "var(--win)",
                           fontWeight: 600,
+                          fontFamily: "var(--font-mono)",
                           fontVariantNumeric: "tabular-nums",
                         }}
                       >
-                        +
-                        {(
-                          (reveal.winners.find((w) => w.seat === r.seat)?.amount ?? 0) / 1e6
-                        ).toFixed(2)}{" "}
-                        USDC
+                        +${((reveal.winners.find((w) => w.seat === r.seat)?.amount ?? 0) / 1e6).toFixed(2)}
                       </motion.div>
                     )}
                   </motion.div>
@@ -95,16 +94,17 @@ export function RevealOverlay() {
                 animate={{ opacity: 1 }}
                 transition={{ delay: 1.2 }}
                 style={{
-                  fontSize: 11,
-                  fontFamily: "ui-monospace, monospace",
-                  color: "var(--text-dim)",
-                  padding: "6px 10px",
-                  background: "rgba(20,20,28,0.7)",
-                  borderRadius: 8,
-                  border: "1px solid var(--border)",
+                  fontSize: "var(--text-xs)",
+                  fontFamily: "var(--font-mono)",
+                  color: "var(--text-faint)",
+                  padding: "var(--space-2) var(--space-3)",
+                  background: "var(--bg-elev)",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-soft)",
+                  letterSpacing: "0.02em",
                 }}
               >
-                seed: {reveal.seed.slice(0, 16)}… (re-derive deck to verify)
+                seed {reveal.seed.slice(0, 16)}… · re-derive deck to verify
               </motion.div>
             )}
           </div>
