@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "programs/poker/tests"
   ],
   "scripts": {
     "build": "turbo run build",

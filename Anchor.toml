@@ -5,7 +5,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-poker = "Poker1111111111111111111111111111111111111"
+poker = "9FeibPV2hjbkcu4YHSnUMr9ikWV7QLWMmBpVFZAcYsZH"
 
 [registry]
 url = "https://api.apr.dev"

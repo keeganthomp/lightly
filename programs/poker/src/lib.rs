@@ -15,7 +15,7 @@ use anchor_spl::{
     },
 };
 
-declare_id!("Poker1111111111111111111111111111111111111");
+declare_id!("9FeibPV2hjbkcu4YHSnUMr9ikWV7QLWMmBpVFZAcYsZH");
 
 pub const MAX_SEATS_PER_HAND: usize = 9;
 pub const MAX_RAKE_BPS: u16 = 1000; // 10% hard cap
@@ -118,7 +118,10 @@ pub mod poker {
 
         let table = &ctx.accounts.table;
         let table_key = table.key();
-        let signer: &[&[&[u8]]] = &[&[b"table", &table.id.to_le_bytes(), &[table.bump]]];
+        let id_bytes = table.id.to_le_bytes();
+        let bump = [table.bump];
+        let signer_seeds: [&[u8]; 3] = [b"table", id_bytes.as_ref(), bump.as_ref()];
+        let signer: &[&[&[u8]]] = &[&signer_seeds];
 
         let cpi = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
@@ -144,7 +147,10 @@ pub mod poker {
     /// Operator locks N seats at the start of a hand. Seats stay locked until
     /// `settle_hand` or `emergency_timeout_refund`. `remaining_accounts` is the
     /// list of PlayerSeat PDAs to lock.
-    pub fn begin_hand(ctx: Context<BeginHand>, hand_id: u64) -> Result<()> {
+    pub fn begin_hand<'info>(
+        ctx: Context<'_, '_, 'info, 'info, BeginHand<'info>>,
+        hand_id: u64,
+    ) -> Result<()> {
         require!(hand_id > 0, PokerError::InvalidHandId);
         require!(
             hand_id > ctx.accounts.table.active_hand_id,
@@ -184,8 +190,8 @@ pub mod poker {
     ///   - creates SettlementReceipt PDA (replay protection via `init`)
     ///
     /// `remaining_accounts` must be PlayerSeat PDAs in the same order as `deltas`.
-    pub fn settle_hand(
-        ctx: Context<SettleHand>,
+    pub fn settle_hand<'info>(
+        ctx: Context<'_, '_, 'info, 'info, SettleHand<'info>>,
         hand_id: u64,
         deltas: Vec<SeatDelta>,
         rake: u64,
@@ -277,7 +283,10 @@ pub mod poker {
 
         let table = &ctx.accounts.table;
         let table_key = table.key();
-        let signer: &[&[&[u8]]] = &[&[b"table", &table.id.to_le_bytes(), &[table.bump]]];
+        let id_bytes = table.id.to_le_bytes();
+        let bump = [table.bump];
+        let signer_seeds: [&[u8]; 3] = [b"table", id_bytes.as_ref(), bump.as_ref()];
+        let signer: &[&[&[u8]]] = &[&signer_seeds];
 
         let cpi = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
@@ -310,7 +319,10 @@ pub mod poker {
             .ok_or(PokerError::Overflow)?;
 
         let table_key = table.key();
-        let signer: &[&[&[u8]]] = &[&[b"table", &table.id.to_le_bytes(), &[table.bump]]];
+        let id_bytes = table.id.to_le_bytes();
+        let bump = [table.bump];
+        let signer_seeds: [&[u8]; 3] = [b"table", id_bytes.as_ref(), bump.as_ref()];
+        let signer: &[&[&[u8]]] = &[&signer_seeds];
 
         let cpi = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
@@ -394,7 +406,7 @@ pub struct InitializeTable<'info> {
         init,
         payer = operator,
         space = 8 + Table::INIT_SPACE,
-        seeds = [b"table", &id.to_le_bytes()],
+        seeds = [b"table".as_ref(), id.to_le_bytes().as_ref()],
         bump,
     )]
     pub table: Account<'info, Table>,
@@ -421,7 +433,7 @@ pub struct BuyIn<'info> {
     pub player: Signer<'info>,
 
     #[account(
-        seeds = [b"table", &table.id.to_le_bytes()],
+        seeds = [b"table".as_ref(), table.id.to_le_bytes().as_ref()],
         bump = table.bump,
         has_one = token_mint,
         has_one = token_program,
@@ -450,7 +462,7 @@ pub struct BuyIn<'info> {
         init_if_needed,
         payer = player,
         space = 8 + PlayerSeat::INIT_SPACE,
-        seeds = [b"seat", table.key().as_ref(), player.key().as_ref()],
+        seeds = [b"seat".as_ref(), table.key().as_ref(), player.key().as_ref()],
         bump,
     )]
     pub seat: Account<'info, PlayerSeat>,
@@ -465,7 +477,7 @@ pub struct CashOut<'info> {
     pub player: Signer<'info>,
 
     #[account(
-        seeds = [b"table", &table.id.to_le_bytes()],
+        seeds = [b"table".as_ref(), table.id.to_le_bytes().as_ref()],
         bump = table.bump,
         has_one = token_mint,
         has_one = token_program,
@@ -492,7 +504,7 @@ pub struct CashOut<'info> {
 
     #[account(
         mut,
-        seeds = [b"seat", table.key().as_ref(), player.key().as_ref()],
+        seeds = [b"seat".as_ref(), table.key().as_ref(), player.key().as_ref()],
         bump = seat.bump,
         has_one = player,
     )]
@@ -507,7 +519,7 @@ pub struct BeginHand<'info> {
 
     #[account(
         mut,
-        seeds = [b"table", &table.id.to_le_bytes()],
+        seeds = [b"table".as_ref(), table.id.to_le_bytes().as_ref()],
         bump = table.bump,
         has_one = operator,
     )]
@@ -522,7 +534,7 @@ pub struct SettleHand<'info> {
 
     #[account(
         mut,
-        seeds = [b"table", &table.id.to_le_bytes()],
+        seeds = [b"table".as_ref(), table.id.to_le_bytes().as_ref()],
         bump = table.bump,
         has_one = operator,
     )]
@@ -532,7 +544,7 @@ pub struct SettleHand<'info> {
         init,
         payer = operator,
         space = 8 + SettlementReceipt::INIT_SPACE,
-        seeds = [b"receipt", table.key().as_ref(), &hand_id.to_le_bytes()],
+        seeds = [b"receipt".as_ref(), table.key().as_ref(), hand_id.to_le_bytes().as_ref()],
         bump,
     )]
     pub receipt: Account<'info, SettlementReceipt>,
@@ -545,7 +557,7 @@ pub struct EmergencyTimeoutRefund<'info> {
     pub player: Signer<'info>,
 
     #[account(
-        seeds = [b"table", &table.id.to_le_bytes()],
+        seeds = [b"table".as_ref(), table.id.to_le_bytes().as_ref()],
         bump = table.bump,
         has_one = token_mint,
         has_one = token_program,
@@ -572,7 +584,7 @@ pub struct EmergencyTimeoutRefund<'info> {
 
     #[account(
         mut,
-        seeds = [b"seat", table.key().as_ref(), player.key().as_ref()],
+        seeds = [b"seat".as_ref(), table.key().as_ref(), player.key().as_ref()],
         bump = seat.bump,
         has_one = player,
     )]
@@ -587,7 +599,7 @@ pub struct WithdrawRake<'info> {
 
     #[account(
         mut,
-        seeds = [b"table", &table.id.to_le_bytes()],
+        seeds = [b"table".as_ref(), table.id.to_le_bytes().as_ref()],
         bump = table.bump,
         has_one = operator,
         has_one = token_mint,

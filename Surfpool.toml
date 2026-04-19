@@ -1,0 +1,31 @@
+# Surfpool — local Solana validator with mainnet state cloning.
+# Run: `surfpool start`. RPC at http://127.0.0.1:8899, WS at ws://127.0.0.1:8900.
+
+[surfnet]
+# Block height starts here; surfpool advances slots locally.
+slot = "latest"
+# Clone from mainnet so we use the real USDC/USDT mints.
+remote_rpc_url = "https://api.mainnet-beta.solana.com"
+
+# Auto-stream mainnet account state on first access.
+[surfnet.accounts]
+auto_clone = true
+
+# Pre-clone the things we always touch so the first test isn't slow.
+[[surfnet.preload]]
+# USDC mint (classic SPL Token)
+address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+[[surfnet.preload]]
+# USDT mint (classic SPL Token)
+address = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+
+# Deploy our program at startup.
+[[deploy]]
+program_id = "9FeibPV2hjbkcu4YHSnUMr9ikWV7QLWMmBpVFZAcYsZH"
+binary = "target/deploy/poker.so"
+
+# Airdrop a dev wallet so the localnet has SOL to pay rent + fees.
+[[airdrop]]
+address = "AUTO_FROM_KEYPAIR"   # surfpool resolves to ~/.config/solana/id.json
+amount_sol = 1000
